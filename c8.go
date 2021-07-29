@@ -159,12 +159,14 @@ type Cpu struct {
 	dt    uint16
 	st    uint16
 	rnd   *rand.Rand
+	last  time.Time
 }
 
 func NewCpu() *Cpu {
 	cpu := new(Cpu)
 	cpu.pc = 0x200
 	cpu.rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
+	cpu.last = time.Now()
 	return cpu
 }
 
@@ -177,8 +179,8 @@ func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
 	o2 := mem.buf[cpu.pc] & 0x0F
 	o3 := mem.buf[cpu.pc+1] >> 4
 	o4 := mem.buf[cpu.pc+1] & 0x0F
-	//opcode := fmt.Sprintf("%02X%02X%02X%02X", o1, o2, o3, o4)
-	//log.Printf("Tick sp=%d pc=%d dt=%d st=%d opcode=%s", cpu.sp, cpu.pc, cpu.dt, cpu.st, opcode)
+	opcode := fmt.Sprintf("%02X%02X%02X%02X", o1, o2, o3, o4)
+	log.Printf("Tick sp=%d pc=%d dt=%d st=%d opcode=%s", cpu.sp, cpu.pc, cpu.dt, cpu.st, opcode)
 
 	nnn := (uint16(o2) << 8) + (uint16(o3) << 4) + uint16(o4)
 	kk := (uint8(o3) << 4) + uint8(o4)
@@ -318,7 +320,7 @@ func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
 		log.Println("DRW - Vx, Vy, nibble")
 		n := o4
 		bytes := mem.buf[cpu.i : cpu.i+uint16(n)]
-		vme.draw(vx, vy, bytes)
+		cpu.v[0xF] = vme.draw(vx, vy, bytes)
 		cmd = Next{}
 	case 0xE:
 		switch o3 {
@@ -332,7 +334,6 @@ func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
 				}
 				if vx == *key {
 					pressed = true
-					break
 				}
 			}
 			if pressed {
@@ -350,13 +351,12 @@ func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
 				}
 				if vx == *key {
 					pressed = true
-					break
 				}
 			}
 			if !pressed {
-				cmd = Next{}
-			} else {
 				cmd = Skip{}
+			} else {
+				cmd = Next{}
 			}
 		}
 	case 0xF:
@@ -382,6 +382,7 @@ func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
 			case 0x5:
 				log.Println("Fx15 - LD DT")
 				cpu.dt = vx
+				cpu.last = time.Now()
 				cmd = Next{}
 			case 0x8:
 				log.Println("Fx18 - LD ST")
@@ -421,8 +422,11 @@ func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
 		cmd.exec(cpu)
 	}
 
-	if cpu.dt > 0 {
+	now := time.Now()
+	elapsed := now.Sub(cpu.last)
+	if elapsed.Seconds() > 1.0/60 && cpu.dt > 0 {
 		cpu.dt -= 1
+		cpu.last = now
 	}
 
 	return nil
@@ -494,7 +498,7 @@ func (vme *VideoMemory) clear() {
 	}
 }
 
-func (vme *VideoMemory) draw(x uint16, y uint16, buf []byte) {
+func (vme *VideoMemory) draw(x uint16, y uint16, buf []byte) uint8 {
 	vf := uint16(0)
 	for i, byte := range buf {
 		i := uint16(i)
@@ -506,6 +510,12 @@ func (vme *VideoMemory) draw(x uint16, y uint16, buf []byte) {
 		vf += vme.draw_pixcel(x+5, y+i, (byte>>2)&0x1)
 		vf += vme.draw_pixcel(x+6, y+i, (byte>>1)&0x1)
 		vf += vme.draw_pixcel(x+7, y+i, (byte>>0)&0x1)
+	}
+
+	if vf > 0 {
+		return 1
+	} else {
+		return 0
 	}
 }
 
@@ -524,8 +534,7 @@ func (vme *VideoMemory) draw_pixcel(x uint16, y uint16, new byte) uint16 {
 }
 
 func main() {
-	time.Sleep(10 * time.Second)
-	ebiten.SetMaxTPS(200)
+	ebiten.SetMaxTPS(600)
 	ebiten.SetWindowSize(640, 320)
 	ebiten.SetWindowTitle("CHIP-8")
 	cpu := NewCpu()
