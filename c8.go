@@ -15,6 +15,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/audio"
+	//"github.com/hajimehoshi/ebiten/v2/audio/mp3"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 )
@@ -70,13 +71,9 @@ func (g *Game) Update() error {
 		log.Printf("Unprocessed keys: %s", strings.Join(keys, " "))
 	}
 
-	err := g.cpu.Tick(g.mem, g.vme, g.kb)
+	err := g.cpu.Tick(g.mem, g.vme, g.audio, g.kb)
 	if err != nil {
 		return err
-	}
-
-	if g.cpu.st > 0 {
-		g.audio.Play()
 	}
 
 	return nil
@@ -159,14 +156,16 @@ type Cpu struct {
 	dt    uint16
 	st    uint16
 	rnd   *rand.Rand
-	last  time.Time
+	lastd time.Time
+	lasts time.Time
 }
 
 func NewCpu() *Cpu {
 	cpu := new(Cpu)
 	cpu.pc = 0x200
 	cpu.rnd = rand.New(rand.NewSource(time.Now().UnixNano()))
-	cpu.last = time.Now()
+	cpu.lastd = time.Now()
+	cpu.lasts = time.Now()
 	return cpu
 }
 
@@ -174,7 +173,7 @@ func (cpu *Cpu) rand() uint8 {
 	return uint8(cpu.rnd.Intn(256))
 }
 
-func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
+func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, audio *audio.Player, kb *Keyboard) error {
 	o1 := mem.buf[cpu.pc] >> 4
 	o2 := mem.buf[cpu.pc] & 0x0F
 	o3 := mem.buf[cpu.pc+1] >> 4
@@ -382,11 +381,12 @@ func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
 			case 0x5:
 				log.Println("Fx15 - LD DT")
 				cpu.dt = vx
-				cpu.last = time.Now()
+				cpu.lastd = time.Now()
 				cmd = Next{}
 			case 0x8:
 				log.Println("Fx18 - LD ST")
 				cpu.st = vx
+				cpu.lasts = time.Now()
 				cmd = Next{}
 			case 0xE:
 				log.Println("Fx1E - ADD I Vx")
@@ -423,10 +423,18 @@ func (cpu *Cpu) Tick(mem *Memory, vme *VideoMemory, kb *Keyboard) error {
 	}
 
 	now := time.Now()
-	elapsed := now.Sub(cpu.last)
+	elapsed := now.Sub(cpu.lastd)
 	if elapsed.Seconds() > 1.0/60 && cpu.dt > 0 {
 		cpu.dt -= 1
-		cpu.last = now
+		cpu.lastd = now
+	}
+
+	elapsed = now.Sub(cpu.lasts)
+	if elapsed.Seconds() > 1.0/60 && cpu.st > 0 {
+		audio.Play()
+		audio.Rewind()
+		cpu.st -= 1
+		cpu.lasts = now
 	}
 
 	return nil
@@ -550,7 +558,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	audio, err := audio.NewPlayer(audio.NewContext(3200), f)
+	audio, err := audio.NewPlayer(audio.NewContext(32000), f)
 	if err != nil {
 		log.Fatal(err)
 	}
