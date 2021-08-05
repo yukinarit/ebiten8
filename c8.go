@@ -1,31 +1,32 @@
 package main
 
 import (
-	//"bufio"
 	"fmt"
 	"image/color"
-	"strings"
-	"time"
-
-	//"io"
-	//"io/ioutil"
 	"log"
 	"math/rand"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/audio"
-	//"github.com/hajimehoshi/ebiten/v2/audio/mp3"
 	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/hajimehoshi/ebiten/v2/text"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/opentype"
 )
 
 const (
-	V_PIXELS = 32
-	H_PIXELS = 64
-	SCALE    = 10
-	WIDTH    = H_PIXELS * SCALE
-	HEIGHT   = V_PIXELS * SCALE
+	V_PIXELS     = 32
+	H_PIXELS     = 64
+	SCALE        = 10
+	WIDTH        = H_PIXELS * SCALE
+	HEIGHT       = V_PIXELS * SCALE
+	BUTTON_WIDTH = 80 // Button width of Game Select UI
+	BUTTON_HIGHT = 23 // Button height of Game Select UI
+	SELECT_HIGHT = 45 // Title height of Game Select UI
 )
 
 // A pixel in Chip8 console.
@@ -52,7 +53,7 @@ func (p *Pixel) Draw(screen *ebiten.Image) {
 }
 
 // Game main.
-type Game struct {
+type Chip8 struct {
 	cpu   *Cpu
 	mem   *Memory
 	vme   *VideoMemory
@@ -60,36 +61,33 @@ type Game struct {
 	kb    *Keyboard
 }
 
-func (g *Game) Update() error {
-	g.kb.Update()
+func (c8 *Chip8) Update() {
+	c8.kb.Update()
 
-	if len(g.kb.queue) > 0 {
+	if len(c8.kb.queue) > 0 {
 		keys := []string{}
-		for _, key := range g.kb.queue {
+		for _, key := range c8.kb.queue {
 			keys = append(keys, fmt.Sprintf("%d", key))
 		}
 		log.Printf("Unprocessed keys: %s", strings.Join(keys, " "))
 	}
 
-	err := g.cpu.Tick(g.mem, g.vme, g.audio, g.kb)
+	err := c8.cpu.Tick(c8.mem, c8.vme, c8.audio, c8.kb)
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
-
-	return nil
 }
 
-func (g *Game) Draw(screen *ebiten.Image) {
+func (c8 *Chip8) Draw(screen *ebiten.Image) {
 	for x := 0; x < H_PIXELS; x++ {
 		for y := 0; y < V_PIXELS; y++ {
-			xor := g.vme.mem[x][y] ^ g.vme.buf[x][y]
+			xor := c8.vme.mem[x][y] ^ c8.vme.buf[x][y]
 			if xor == 1 {
-				pixel := Pixel{x, y, bytob(g.vme.buf[x][y])}
+				pixel := Pixel{x, y, bytob(c8.vme.buf[x][y])}
 				pixel.Draw(screen)
 			}
 		}
 	}
-	ebitenutil.DebugPrint(screen, fmt.Sprintf("%f", ebiten.CurrentTPS()))
 }
 
 func bytob(value byte) bool {
@@ -98,10 +96,6 @@ func bytob(value byte) bool {
 	} else {
 		return false
 	}
-}
-
-func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
-	return 640, 320
 }
 
 type Keyboard struct {
@@ -541,18 +535,234 @@ func (vme *VideoMemory) draw_pixcel(x uint16, y uint16, new byte) uint16 {
 	return vf
 }
 
+type Button struct {
+	text      string
+	img       *ebiten.Image
+	x         int
+	y         int
+	onclicked func(*Button)
+	font      *font.Face
+	rom       Rom
+}
+
+func NewButton(text string, font *font.Face, x, y int, rom Rom, onclicked func(*Button)) *Button {
+	btn := new(Button)
+	img := ebiten.NewImage(BUTTON_WIDTH-1, BUTTON_HIGHT-1)
+	img.Fill(color.White)
+	btn.img = img
+	btn.text = text
+	btn.font = font
+	btn.x = x
+	btn.y = y
+	btn.rom = rom
+	btn.onclicked = onclicked
+	return btn
+}
+
+func (btn *Button) Draw(screen *ebiten.Image) {
+	opts := &ebiten.DrawImageOptions{}
+	opts.GeoM.Translate(float64(btn.x*BUTTON_WIDTH), float64(btn.y*BUTTON_HIGHT)+float64(SELECT_HIGHT))
+	screen.DrawImage(btn.img, opts)
+
+	text.Draw(screen, btn.text, *btn.font, btn.x*BUTTON_WIDTH+10, btn.y*BUTTON_HIGHT+17+SELECT_HIGHT, color.Black)
+}
+
+type UI struct {
+	btns        []*Button
+	oncompleted func(rom Rom)
+	font        *font.Face
+}
+
+func (ui *UI) Draw(screen *ebiten.Image) {
+	text.Draw(screen, "SELECT A GAME", *ui.font, 160, 36, color.White)
+	for _, btn := range ui.btns {
+		btn.Draw(screen)
+	}
+}
+
+func (ui *UI) Update() {
+	clicked := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+	x, y := ebiten.CursorPosition()
+	if clicked {
+		log.Printf("Clicked: %v on (%d, %d)", clicked, x, y)
+		for _, btn := range ui.btns {
+			minx := btn.img.Bounds().Min.X + btn.x*BUTTON_WIDTH
+			maxx := btn.img.Bounds().Max.X + btn.x*BUTTON_WIDTH
+			miny := btn.img.Bounds().Min.Y + btn.y*BUTTON_HIGHT + SELECT_HIGHT
+			maxy := btn.img.Bounds().Max.Y + btn.y*BUTTON_HIGHT + SELECT_HIGHT
+			log.Printf("x=%d y=%d minx=%d maxx=%d miny=%d maxy=%d", x, y, minx, maxx, miny, maxy)
+			if x >= minx && x <= maxx && y >= miny && y <= maxy {
+				btn.onclicked(btn)
+			}
+		}
+	}
+}
+
+type Rom struct {
+	name string
+	path string
+}
+
+func NewUI() *UI {
+	ROMS := [90]Rom{
+		{"15Puzzle", "roms/15 Puzzle [Roger Ivie].ch8"},
+		{"Addition Problems", "roms/Addition Problems [Paul C. Moews].ch8"},
+		{"Airplane", "roms/Airplane.ch8"},
+		{"Animal Race", "roms/Animal Race [Brian Astle].ch8"},
+		{"Astro Dodge", "roms/Astro Dodge [Revival Studios, 2008].ch8"},
+		{"BMP Viewer", "roms/BMP Viewer - Hello (C8 example) [Hap, 2005].ch8"},
+		{"Biorhythm ", "roms/Biorhythm [Jef Winsor].ch8"},
+		{"Blinky", "roms/Blinky [Hans Christian Egeberg, 1991].ch8"},
+		{"Blitz ", "roms/Blitz [David Winter].ch8"},
+		{"Bowling", "roms/Bowling [Gooitzen van der Wal].ch8"},
+		{"Breakout", "roms/Breakout (Brix hack) [David Winter, 1997].ch8"},
+		{"Brick", "roms/Brick (Brix hack, 1990).ch8"},
+		{"Brix", "roms/Brix [Andreas Gustafsson, 1990].ch8"},
+		{"Cave", "roms/Cave.ch8"},
+		{"Chip8 Picture", "roms/Chip8 Picture.ch8"},
+		{"Chip8 Logo", "roms/Chip8 emulator Logo [Garstyciuks].ch8"},
+		{"Clock Program", "roms/Clock Program [Bill Fisher, 1981].ch8"},
+		{"Coin Flipping", "roms/Coin Flipping [Carmelo Cortez, 1978].ch8"},
+		{"Connect 4", "roms/Connect 4 [David Winter].ch8"},
+		{"Craps", "roms/Craps [Camerlo Cortez, 1978].ch8"},
+		{"Deflection", "roms/Deflection [John Fort].ch8"},
+		{"Delay Timer Test", "roms/Delay Timer Test [Matthew Mikolay, 2010].ch8"},
+		{"Division Test", "roms/Division Test [Sergey Naydenov, 2010].ch8"},
+		{"Figures", "roms/Figures.ch8"},
+		{"Filter", "roms/Filter.ch8"},
+		{"Fishie", "roms/Fishie [Hap, 2005].ch8"},
+		{"Framed", "roms/Framed MK1 [GV Samways, 1980].ch8"},
+		{"Framed2", "roms/Framed MK2 [GV Samways, 1980].ch8"},
+		{"Guess", "roms/Guess [David Winter].ch8"},
+		{"Hi-Lo", "roms/Hi-Lo [Jef Winsor, 1978].ch8"},
+		{"Hidden", "roms/Hidden [David Winter, 1996].ch8"},
+		{"IBM Logo", "roms/IBM Logo.ch8"},
+		{"Jumping X", "roms/Jumping X and O [Harry Kleinberg, 1977].ch8"},
+		{"Kaleidoscope", "roms/Kaleidoscope [Joseph Weisbecker, 1978].ch8"},
+		{"Keypad Test", "roms/Keypad Test [Hap, 2006].ch8"},
+		{"Landing", "roms/Landing.ch8"},
+		{"Life", "roms/Life [GV Samways, 1980].ch8"},
+		{"Lunar Lander", "roms/Lunar Lander (Udo Pernisz, 1979).ch8"},
+		{"Mastermind FourRow", "roms/Mastermind FourRow (Robert Lindley, 1978).ch8"},
+		{"Maze", "roms/Maze [David Winter, 199x].ch8"},
+		{"Merlin", "roms/Merlin [David Winter].ch8"},
+		{"Minimal", "roms/Minimal game [Revival Studios, 2007].ch8"},
+		{"Missile", "roms/Missile [David Winter].ch8"},
+		{"Most", "roms/Most Dangerous Game [Peter Maruhnic].ch8"},
+		{"Nim ", "roms/Nim [Carmelo Cortez, 1978].ch8"},
+		{"Paddles", "roms/Paddles.ch8"},
+		{"Particle ", "roms/Particle Demo [zeroZshadow, 2008].ch8"},
+		{"Pong", "roms/Pong (1 player).ch8"},
+		{"Pong 2", "roms/Pong 2 (Pong hack) [David Winter, 1997].ch8"},
+		{"Pong 3", "roms/Pong [Paul Vervalin, 1990].ch8"},
+		{"Programmable Spacefighters", "roms/Programmable Spacefighters [Jef Winsor].ch8"},
+		{"Puzzle", "roms/Puzzle.ch8"},
+		{"Random Number", "roms/Random Number Test [Matthew Mikolay, 2010].ch8"},
+		{"Reversi", "roms/Reversi [Philip Baltzer].ch8"},
+		{"Rocket Launch", "roms/Rocket Launch [Jonas Lindstedt].ch8"},
+		{"Rocket Launcher", "roms/Rocket Launcher.ch8"},
+		{"Rocket ", "roms/Rocket [Joseph Weisbecker, 1978].ch8"},
+		{"Rush Hour", "roms/Rush Hour [Hap, 2006].ch8"},
+		{"Russian Roulette", "roms/Russian Roulette [Carmelo Cortez, 1978].ch8"},
+		{"SQRT Test", "roms/SQRT Test [Sergey Naydenov, 2010].ch8"},
+		{"Sequence Shoot", "roms/Sequence Shoot [Joyce Weisbecker].ch8"},
+		{"Shooting Stars", "roms/Shooting Stars [Philip Baltzer, 1978].ch8"},
+		{"Sierpinski", "roms/Sierpinski [Sergey Naydenov, 2010].ch8"},
+		{"Slide ", "roms/Slide [Joyce Weisbecker].ch8"},
+		{"Soccer", "roms/Soccer.ch8"},
+		{"Space Flight", "roms/Space Flight.ch8"},
+		{"Space Intercept", "roms/Space Intercept [Joseph Weisbecker, 1978].ch8"},
+		{"Space Invaders", "roms/Space Invaders [David Winter].ch8"},
+		{"Spooky Spot", "roms/Spooky Spot [Joseph Weisbecker, 1978].ch8"},
+		{"Squash", "roms/Squash [David Winter].ch8"},
+		{"Stars", "roms/Stars [Sergey Naydenov, 2010].ch8"},
+		{"Submarine", "roms/Submarine [Carmelo Cortez, 1978].ch8"},
+		{"Sum Fun", "roms/Sum Fun [Joyce Weisbecker].ch8"},
+		{"Syzygy", "roms/Syzygy [Roy Trevino, 1990].ch8"},
+		{"Tank", "roms/Tank.ch8"},
+		{"Tapeworm", "roms/Tapeworm [JDR, 1999].ch8"},
+		{"Tetris", "roms/Tetris [Fran Dachille, 1991].ch8"},
+		{"Tic-Tac-Toe", "roms/Tic-Tac-Toe [David Winter].ch8"},
+		{"Timebomb", "roms/Timebomb.ch8"},
+		{"Trip8 Demo", "roms/Trip8 Demo (2008) [Revival Studios].ch8"},
+		{"Tron", "roms/Tron.ch8"},
+		{"UFO", "roms/UFO [Lutz V, 1992].ch8"},
+		{"Vers", "roms/Vers [JMN, 1991].ch8"},
+		{"Vertical Brix", "roms/Vertical Brix [Paul Robson, 1996].ch8"},
+		{"Wall", "roms/Wall [David Winter].ch8"},
+		{"Wipe Off", "roms/Wipe Off [Joseph Weisbecker].ch8"},
+		{"Worm V4", "roms/Worm V4 [RB-Revival Studios, 2007].ch8"},
+		{"X-Mirror", "roms/X-Mirror.ch8"},
+		{"Zero Demo", "roms/Zero Demo [zeroZshadow, 2007].ch8"},
+		{"ZeroPong ", "roms/ZeroPong [zeroZshadow, 2007].ch8"},
+	}
+
+	ui := new(UI)
+
+	tt, err := opentype.Parse(PressStart2P_ttf)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	titleFont, err := opentype.NewFace(tt, &opentype.FaceOptions{
+		Size:    24,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+	btnFont, err := opentype.NewFace(tt, &opentype.FaceOptions{
+		Size:    7,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+	ui.font = &titleFont
+
+	cb := func(btn *Button) {
+		log.Printf("button %s was clicked!", btn.text)
+		if ui.oncompleted != nil {
+			ui.oncompleted(btn.rom)
+		}
+	}
+
+	for n, rom := range ROMS {
+		x := n % 8
+		y := n / 8
+		ui.btns = append(ui.btns, NewButton(rom.name, &btnFont, x, y, rom, cb))
+	}
+
+	return ui
+}
+
+// Workaround to create a variable to receive both UI and Chip8 object.
+type Scene interface {
+	Draw(screen *ebiten.Image)
+	Update()
+}
+
+type Game struct {
+	scene Scene
+}
+
+func (g *Game) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
+	return 640, 320
+}
+
+func (g *Game) Draw(screen *ebiten.Image) {
+	g.scene.Draw(screen)
+	ebitenutil.DebugPrint(screen, fmt.Sprintf("%f", ebiten.CurrentTPS()))
+}
+
+func (g *Game) Update() error {
+	g.scene.Update()
+	return nil
+}
+
 func main() {
-	ebiten.SetMaxTPS(600)
+	ebiten.SetMaxTPS(800)
 	ebiten.SetWindowSize(640, 320)
 	ebiten.SetWindowTitle("CHIP-8")
 	cpu := NewCpu()
 	mem := NewMemory()
 	vme := NewVideoMemory()
-
-	err := mem.Load("INVADERS")
-	if err != nil {
-		panic(err)
-	}
 
 	f, err := os.Open("audio.mp3")
 	if err != nil {
@@ -566,7 +776,18 @@ func main() {
 
 	kb := NewKeyboard()
 
-	game := Game{cpu, mem, vme, audio, kb}
+	ui := NewUI()
+
+	c8 := Chip8{cpu, mem, vme, audio, kb}
+
+	game := Game{ui}
+	ui.oncompleted = func(rom Rom) {
+		game.scene = &c8
+		err := c8.mem.Load(rom.path)
+		if err != nil {
+			panic(err)
+		}
+	}
 	if err := ebiten.RunGame(&game); err != nil {
 		log.Fatal(err)
 	}
